@@ -1,0 +1,83 @@
+# Runs the job bot on GitHub's schedule. Setup steps are in README.md.
+name: Job watch
+
+on:
+  schedule:
+    # Minute 17 of every hour, UTC. GitHub can start scheduled runs late when it is busy.
+    # Private repository: use "17 */3 * * *" (every 3 hours) to stay within the free minutes.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check: a normal run. dry-run: print what would be sent; nothing is sent or saved."
+        type: choice
+        options: [check, dry-run]
+        default: check
+
+permissions:
+  contents: read
+  actions: read # to see whether a saved history exists
+
+# Never two runs at once: both would start from the same history and send the same jobs.
+concurrency:
+  group: jobwatch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID: ${{ secrets.CHAT_ID }} # optional
+      PROXIES: ${{ secrets.PROXIES }} # optional
+      DB_PATH: data/jobs.db
+      TZ: Asia/Jerusalem
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Dry run
+        if: inputs.mode == 'dry-run'
+        run: python -m jobwatch --dry-run --show-rejected
+
+      # The history (which postings were already sent, what you marked as applied) is a small
+      # SQLite file. Each run loads the newest saved copy and saves a new one at the end.
+      - name: Load history
+        id: history
+        if: inputs.mode != 'dry-run'
+        uses: actions/cache/restore@v6
+        with:
+          path: data
+          key: jobwatch-history-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: jobwatch-history-
+
+      - name: Stop if a saved history exists but did not load
+        if: inputs.mode != 'dry-run' && steps.history.outputs.cache-matched-key == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          saved=$(gh cache list --repo "$GITHUB_REPOSITORY" --key jobwatch-history- --limit 1 --json id --jq length)
+          if [ "$saved" != "0" ]; then
+            echo "::error title=History did not load::A saved history exists but was not restored, so this run stopped rather than send old jobs again. Re-run the workflow. If it keeps happening, delete the jobwatch-history caches (Actions > Caches) to start fresh."
+            exit 1
+          fi
+          echo "No saved history yet: this is the first run."
+
+      - name: Check LinkedIn
+        if: inputs.mode != 'dry-run'
+        run: python -m jobwatch --once
+
+      - name: Save history
+        if: always() && inputs.mode != 'dry-run' && hashFiles('data/jobs.db') != ''
+        uses: actions/cache/save@v6
+        with:
+          path: data
+          key: jobwatch-history-${{ github.run_id }}-${{ github.run_attempt }}
