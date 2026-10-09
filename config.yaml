@@ -1,0 +1,663 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# What the bot looks for. Edit it here on GitHub; the next run uses it.
+#
+# To see the effect of a change without sending anything, start the workflow by
+# hand (Actions > Job watch > Run workflow) in `dry-run` mode: the log lists what
+# would be sent, what was filtered out, and why.
+#
+# How often the bot checks is set by `cron` in .github/workflows/jobwatch.yml.
+#
+# How terms match (titles and descriptions are compared case-insensitively,
+# with punctuation ignored, so "UI/UX", "ui-ux" and "UI UX" are the same):
+#   - English terms match whole words, with an optional plural "s":
+#       "intern" matches "Intern" and "Interns" but not "Internal".
+#   - Hebrew terms match anywhere in a word: "סטודנט" also matches "לסטודנטים".
+#     Gender suffixes are ignored: "מעצב/ת גרפי/ת" is read as "מעצב גרפי".
+#   - "re:<pattern>" is a raw, case-sensitive regular expression.
+# ─────────────────────────────────────────────────────────────────────────────
+
+linkedin:
+  locations: ["Israel"]       # each search term is run once per location
+  first_run_hours: 24         # how far back the very first check looks
+  max_lookback_hours: 72      # after downtime, look back at most this far
+  results_per_query: 50
+  pause_between_queries: [4, 9]        # seconds, random within the range
+  read_descriptions: true              # open the posting to confirm unclear titles
+                                       # and to detect part-time / internship
+  max_descriptions_per_cycle: 60
+  pause_between_descriptions: [2, 5]   # seconds
+  exclude_locations: []                # e.g. ["Haifa", "North District", "חיפה"]
+  exclude_companies: []                # e.g. staffing agencies you don't want
+
+notifications:
+  show_match_reason: true     # adds a "why this matched" line to each message
+  repost_window_days: 14      # same title + company + location within this window = repost, skipped
+  keep_history_days: 120      # forget old postings after this long (applied ones are kept)
+
+# A job is sent when it passes at least one track.
+# Inside a track: `exclude_title` is checked first, then the rules top to bottom;
+# the first rule that passes accepts the job.
+#   title:        the title must contain a term from EVERY group listed
+#   title_not:    ...and no term from any of these groups
+#   description:  ...and the posting text must contain terms from this group
+#                 (at least `min_description_hits` different ones, default 1)
+#   or_employment: LinkedIn's "Employment type" / "Seniority level" also satisfies the description check
+#   without_description: accept | reject — what to do if the posting couldn't be read
+tracks:
+  - id: design
+    label: Design
+    emoji: "🎨"
+    star: [part-time, student, freelance, internship]   # these get a ⭐
+    search_terms:
+      - graphic designer
+      - brand designer
+      - visual designer
+      - UX UI designer
+      - product designer
+      - web designer
+      - designer
+      - illustrator
+      - 3D artist
+      - art director
+      - design student
+      - מעצב
+      - עיצוב גרפי
+    exclude_title: [not_visual_design]
+    # To hide senior roles, add the `senior` group:  exclude_title: [not_visual_design, senior]
+    rules:
+      - name: design role in the title
+        title: [design_roles]
+      - name: generic design title, confirmed by the description
+        title: [design_generic]
+        description: design_signals
+        min_description_hits: 2
+        without_description: reject
+
+  - id: cs_student
+    label: CS student
+    emoji: "🎓"
+    star: [part-time]
+    search_terms:
+      - student
+      - סטודנט
+      - intern
+      - internship
+      - student software engineer
+      - student developer
+      - computer science student
+      - student QA automation
+      - student data
+      - student position
+    exclude_title: [not_a_student_job]
+    rules:
+      - name: student + tech role in the title
+        title: [student, tech]
+        title_not: [other_fields]
+      - name: student title, CS degree named in the description
+        title: [student]
+        title_not: [other_fields]
+        description: cs_degree
+        without_description: accept
+      - name: tech title, description says it is a student position
+        title: [tech]
+        title_not: [senior, other_fields]
+        description: student_phrases
+        or_employment: [internship]
+        without_description: reject
+
+# Tags shown on a message. A tag is set when the title or the description
+# contains a term from the group, or LinkedIn's employment type matches.
+highlights:
+  part-time:
+    title: part_time
+    description: part_time
+    employment: [parttime]
+  student:
+    title: student
+    description: student_phrases
+  internship:
+    employment: [internship]
+  freelance:
+    title: freelance
+    description: freelance
+  remote:
+    title: remote
+
+term_groups:
+  # ── Design ────────────────────────────────────────────────────────────────
+  # Based on the portfolio: branding and logos, UI/UX, web design, icons,
+  # 3D illustration, front-end.
+  design_roles:
+    - graphic designer
+    - graphic design
+    - graphic artist
+    - brand designer
+    - branding designer
+    - brand design
+    - brand identity
+    - visual identity
+    - visual designer
+    - visual design
+    - visual communication
+    - ui designer
+    - ux designer
+    - ui
+    - ux
+    - user experience
+    - user interface
+    - product designer
+    - product design
+    - web designer
+    - web design
+    - website designer
+    - landing page
+    - marketing designer
+    - creative designer
+    - communication designer
+    - presentation designer
+    - icon designer
+    - illustrator
+    - illustration
+    - 3d artist
+    - 3d designer
+    - 3d generalist
+    - 3d illustrator
+    - art director
+    - design system
+    - design intern
+    - design student
+    - junior designer
+    - webflow
+    - גרפי            # גרפי, גרפית, גרפיקאי, גרפיקה
+    - מיתוג
+    - מאייר
+    - ארט דירקטור
+    - עיצוב מוצר
+    - מעצב מוצר
+    - מעצבת מוצר
+    - עיצוב אתרים
+    - מעצב אתרים
+    - חווית משתמש
+    - חוויית משתמש
+    - ממשק משתמש
+    # Motion is adjacent to the 3D work; uncomment to include it outright.
+    # - motion designer
+    # - motion graphics
+
+  # Vague titles: accepted only if the description confirms it is visual design.
+  design_generic:
+    - designer
+    - design
+    - creative
+    - artist
+    - מעצב
+    - עיצוב
+    - קריאייטיב
+
+  design_signals:
+    - figma
+    - photoshop
+    - illustrator
+    - indesign
+    - after effects
+    - adobe
+    - typography
+    - logo
+    - branding
+    - brand identity
+    - visual identity
+    - graphic design
+    - visual design
+    - web design
+    - ui
+    - ux
+    - wireframe
+    - design system
+    - illustration
+    - icon
+    - webflow
+    - blender
+    - cinema 4d
+    - c4d
+    - portfolio
+    - פיגמה
+    - פוטושופ
+    - אילוסטרייטור
+    - אינדיזיין
+    - מיתוג
+    - טיפוגרפיה
+    - לוגו
+    - עיצוב גרפי
+    - תיק עבודות
+
+  # "Design" that isn't visual design: chip, hardware, interiors, fashion...
+  not_visual_design:
+    - engineer
+    - engineering
+    - scientist
+    - researcher
+    - writer
+    - copywriter
+    - teacher
+    - instructor
+    - lecturer
+    - sales
+    - employer branding
+    - interior
+    - fashion
+    - instructional
+    - learning
+    - curriculum
+    - organizational
+    - industrial
+    - mechanical
+    - electrical
+    - electronic
+    - electronics
+    - hardware
+    - firmware
+    - embedded
+    - chip
+    - silicon
+    - asic
+    - fpga
+    - vlsi
+    - rtl
+    - ic
+    - soc
+    - analog
+    - rf
+    - antenna
+    - pcb
+    - board
+    - circuit
+    - mask
+    - signal
+    - memory
+    - power
+    - timing
+    - logic
+    - physical design
+    - verification
+    - validation
+    - dft
+    - cad
+    - autocad
+    - revit
+    - bim
+    - solidworks
+    - optical
+    - optics
+    - structural
+    - civil
+    - construction
+    - building
+    - piping
+    - plumbing
+    - hvac
+    - lighting
+    - sound
+    - audio
+    - game designer
+    - level designer
+    - narrative
+    - jewelry
+    - kitchen
+    - furniture
+    - landscape
+    - garden
+    - floral
+    - textile
+    - garment
+    - apparel
+    - footwear
+    - makeup
+    - nail
+    - hair
+    - tattoo
+    - solution
+    - network
+    - database
+    - software
+    - algorithm
+    - automation
+    - backend
+    - back end
+    - process
+    - drug
+    - system design
+    - systems design
+    - system designer
+    - systems designer
+    - conversation designer
+    - prompt
+    - מהנדס
+    - הנדסאי
+    - פנים          # עיצוב פנים
+    - אופנה
+    - מטבח
+    - תכשיט
+    - תעשייתי
+    - אדריכל
+    - שיער
+    - מורה
+    - מרצה
+
+  # ── CS student ────────────────────────────────────────────────────────────
+  student:
+    - student
+    - working student
+    - undergraduate
+    - undergrad
+    - intern
+    - internship
+    - סטודנט
+    - מתמחה
+    - התמחות
+    - "סטאז'"
+
+  tech:
+    - software
+    - developer
+    - development
+    - dev
+    - programmer
+    - programming
+    - coding
+    - "r&d"
+    - rnd
+    - qa
+    - quality assurance
+    - test
+    - testing
+    - tester
+    - automation
+    - sdet
+    - data
+    - analytics
+    - bi
+    - devops
+    - sre
+    - cloud
+    - infrastructure
+    - platform
+    - backend
+    - back end
+    - frontend
+    - front end
+    - fullstack
+    - full stack
+    - web
+    - mobile
+    - android
+    - ios
+    - algorithm
+    - machine learning
+    - ml
+    - deep learning
+    - ai
+    - artificial intelligence
+    - computer vision
+    - nlp
+    - llm
+    - genai
+    - cyber
+    - cybersecurity
+    - security
+    - embedded
+    - firmware
+    - verification
+    - validation
+    - fpga
+    - python
+    - java
+    - javascript
+    - typescript
+    - "c++"
+    - "c#"
+    - golang
+    - react
+    - node
+    - sql
+    - database
+    - linux
+    - network
+    - networking
+    - computer science
+    - computer
+    - simulation
+    - robotics
+    - bioinformatics
+    - blockchain
+    - "re:\\bIT\\b"
+    - תוכנה
+    - מפתח
+    - פיתוח
+    - תכנות
+    - מתכנת
+    - בודק
+    - בדיקות
+    - אוטומציה
+    - דאטה
+    - נתונים
+    - אלגוריתמ
+    - סייבר
+    - אבטחת מידע
+    - מחשב
+    - ורפיקציה
+    - מערכות מידע
+    - בינה מלאכותית
+
+  cs_degree:
+    - computer science
+    - software engineering
+    - computer engineering
+    - information systems
+    - data science
+    - cs student
+    - cs degree
+    - מדעי המחשב
+    - הנדסת תוכנה
+    - הנדסת מחשבים
+    - מערכות מידע
+    - מדעי הנתונים
+
+  # Wording that says the posting itself is a student position.
+  student_phrases:
+    - student position
+    - student job
+    - student role
+    - position for students
+    - position for a student
+    - for students
+    - student for
+    - looking for a student
+    - computer science student
+    - software engineering student
+    - engineering student
+    - cs student
+    - bsc student
+    - b sc student
+    - undergraduate student
+    - currently studying
+    - currently pursuing
+    - currently enrolled
+    - pursuing a bachelor
+    - pursuing a b sc
+    - semesters left
+    - internship program
+    - internship position
+    - intern position
+    - this internship
+    - summer internship
+    - paid internship
+    - סטודנט
+    - התמחות
+
+  # Student jobs in other fields. Checked only against the title.
+  other_fields:
+    - marketing
+    - sales
+    - finance
+    - financial
+    - accounting
+    - accountant
+    - bookkeeping
+    - economics
+    - economist
+    - legal
+    - law
+    - lawyer
+    - hr
+    - human resources
+    - recruiter
+    - recruiting
+    - recruitment
+    - talent acquisition
+    - sourcing
+    - procurement
+    - purchasing
+    - logistics
+    - supply chain
+    - customer success
+    - customer service
+    - content
+    - social media
+    - seo
+    - public relations
+    - event
+    - administrative
+    - secretary
+    - office manager
+    - back office
+    - teacher
+    - teaching
+    - tutor
+    - nursing
+    - medicine
+    - pharmacy
+    - psychology
+    - social work
+    - biology
+    - chemistry
+    - chemical
+    - mechanical
+    - civil
+    - industrial
+    - real estate
+    - hospitality
+    - restaurant
+    - barista
+    - waiter
+    - driver
+    - warehouse
+    - retail
+    - cashier
+    - שיווק
+    - מכירות
+    - כספים
+    - הנהלת חשבונות
+    - חשבונאות
+    - כלכלה
+    - משפט
+    - משאבי אנוש
+    - גיוס
+    - רכש
+    - לוגיסטיקה
+    - שירות לקוחות
+    - תוכן
+    - סושיאל
+    - אדמיניסטר
+    - מזכיר
+    - הוראה
+    - מורה
+    - סיעוד
+    - רפואה
+    - פסיכולוגיה
+    - ביולוגיה
+    - כימיה
+    - מכונות
+    - אזרחית
+    - תעשייה וניהול
+    - מלצר
+    - נהג
+    - מחסן
+    - קופאי
+
+  # Titles that mention students or "development" but aren't student tech jobs.
+  not_a_student_job:
+    - student success
+    - student advisor
+    - student adviser
+    - student recruitment
+    - student recruiter
+    - student affairs
+    - student services
+    - student support
+    - student experience
+    - student life
+    - student engagement
+    - student coordinator
+    - international students
+    - ambassador
+    - phd
+    - doctoral
+    - postdoc
+    - post doc
+    - postdoctoral
+    - business development
+    - sales development
+    - learning and development
+    - "learning & development"
+    - talent development
+    - organizational development
+    - real estate development
+    - data entry
+    - security guard
+    - security officer
+    - פיתוח עסקי
+    - פיתוח ארגוני
+    - הקלדת נתונים
+    - מאבטח
+
+  # ── Shared ────────────────────────────────────────────────────────────────
+  senior:
+    - senior
+    - sr
+    - lead
+    - leader
+    - principal
+    - staff
+    - manager
+    - director
+    - head
+    - vp
+    - chief
+    - cto
+    - architect
+    - expert
+    - experienced
+    - בכיר
+    - ראש צוות
+    - מנהל
+    - מוביל
+    - ארכיטקט
+
+  part_time:
+    - part time
+    - parttime
+    - half time
+    - משרה חלקית
+    - חצי משרה
+    - חלקיות משרה
+
+  freelance:
+    - freelance
+    - freelancer
+    - פרילנס
+
+  remote:
+    - remote
+    - work from home
+    - wfh
+    - מהבית

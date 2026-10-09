@@ -1,0 +1,5 @@
+# Pinned exactly: jobwatch/linkedin.py reads single postings through a private JobSpy
+# method, so an upgrade has to be checked against that call.
+python-jobspy==1.3.0
+aiogram>=3.7,<4
+PyYAML>=6.0
