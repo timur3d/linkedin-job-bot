@@ -68,7 +68,7 @@ class StoredJob:
     """A job together with everything the bot has decided about it."""
 
     job: Job
-    status: str  # pending | rejected | matched | sent | dismissed | duplicate
+    status: str  # pending | rejected | matched | sent | duplicate
     title_match: bool = False  # the title alone was enough to accept it
     attempts: int = 0  # failed tries at reading the description
     tracks: tuple[str, ...] = ()
@@ -78,9 +78,7 @@ class StoredJob:
     unverified: bool = False
     employment_type: str | None = None
     seniority: str | None = None
-    applied: bool = False
-    message_id: int | None = None
-    notified_at: str | None = None
+    description: str | None = None  # the posting's text, kept only until the job has been sent
 
 
 @dataclass

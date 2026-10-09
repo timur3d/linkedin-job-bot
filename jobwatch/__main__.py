@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--once",
         action="store_true",
-        help="a normal run: handle button presses and commands waiting in Telegram, check LinkedIn, send the matches",
+        help="a normal run: answer commands waiting in Telegram, check LinkedIn, send the new jobs",
     )
     mode.add_argument(
         "--dry-run",

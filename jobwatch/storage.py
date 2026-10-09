@@ -1,4 +1,4 @@
-"""SQLite: every posting the bot has seen and what it decided, plus a little bookkeeping."""
+"""SQLite: every posting the bot has seen and what it decided, so nothing is sent twice."""
 
 from __future__ import annotations
 
@@ -30,10 +30,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     unverified      INTEGER NOT NULL DEFAULT 0,
     employment_type TEXT,
     seniority       TEXT,
+    description     TEXT,
     first_seen      TEXT NOT NULL,
-    notified_at     TEXT,
-    applied_at      TEXT,
-    message_id      INTEGER
+    notified_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs (status);
 CREATE INDEX IF NOT EXISTS jobs_fingerprint ON jobs (fingerprint);
@@ -66,7 +65,25 @@ class Storage:
         self._db = sqlite3.connect(str(path))
         self._db.row_factory = sqlite3.Row
         self._db.executescript(_SCHEMA)
+        self._upgrade()
         self._db.commit()
+
+    def _upgrade(self) -> None:
+        """
+        Bring a history file saved by the first version (one message per job, with buttons)
+        up to date, so an update never needs the history to be thrown away.
+
+        That version didn't keep descriptions, so the jobs it sent never came with a file.
+        They are queued again and arrive once more, this time as a list and a file.
+        """
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(jobs)")}
+        if "description" in columns:
+            return
+        self._db.execute("ALTER TABLE jobs ADD COLUMN description TEXT")
+        self._db.execute(
+            """UPDATE jobs SET status = 'pending', attempts = 0, notified_at = NULL
+               WHERE status IN ('matched', 'sent', 'dismissed')"""
+        )
 
     def close(self) -> None:
         self._db.close()
@@ -140,12 +157,13 @@ class Storage:
         *,
         employment_type: str | None = None,
         seniority: str | None = None,
+        description: str | None = None,
     ) -> None:
         """Record the final verdict on a pending job."""
         reason = "; ".join(match.reason for match in outcome.matches) or outcome.reason
         self._db.execute(
             """UPDATE jobs SET status = ?, tracks = ?, flags = ?, starred = ?, reason = ?,
-                               unverified = ?, employment_type = ?, seniority = ?
+                               unverified = ?, employment_type = ?, seniority = ?, description = ?
                WHERE id = ?""",
             (
                 status,
@@ -156,6 +174,7 @@ class Storage:
                 int(outcome.unverified),
                 employment_type,
                 seniority,
+                description,
                 job_id,
             ),
         )
@@ -175,44 +194,26 @@ class Storage:
         ).fetchone()
         return row is not None
 
-    def mark_sent(self, job_id: str, message_id: int | None) -> None:
-        self._db.execute(
-            "UPDATE jobs SET status = 'sent', notified_at = ?, message_id = ? WHERE id = ?",
-            (_now(), message_id, job_id),
+    def mark_sent(self, job_ids: Iterable[str]) -> None:
+        """The jobs went out. Their text is in the file that was sent, so it is dropped here."""
+        now = _now()
+        self._db.executemany(
+            "UPDATE jobs SET status = 'sent', notified_at = ?, description = NULL WHERE id = ?",
+            [(now, job_id) for job_id in job_ids],
         )
         self._db.commit()
-
-    def set_applied(self, job_id: str, applied: bool) -> None:
-        self._db.execute("UPDATE jobs SET applied_at = ? WHERE id = ?", (_now() if applied else None, job_id))
-        self._db.commit()
-
-    def mark_dismissed(self, job_id: str) -> None:
-        self._db.execute("UPDATE jobs SET status = 'dismissed' WHERE id = ?", (job_id,))
-        self._db.commit()
-
-    def applied(self, limit: int = 100) -> list[StoredJob]:
-        rows = self._db.execute(
-            "SELECT * FROM jobs WHERE applied_at IS NOT NULL ORDER BY applied_at DESC LIMIT ?", (limit,)
-        )
-        return [_stored(row) for row in rows]
 
     def counts(self) -> dict[str, int]:
-        counts = {
+        return {
             row["status"]: row["n"]
             for row in self._db.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
         }
-        counts["applied"] = self._db.execute("SELECT COUNT(*) AS n FROM jobs WHERE applied_at IS NOT NULL").fetchone()[
-            "n"
-        ]
-        return counts
 
     def prune(self, keep_days: int) -> int:
-        """Forget old postings. Applied ones are kept, as are ones still waiting to be sent."""
+        """Forget postings first seen long ago. Jobs still on their way out are never dropped."""
         cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat(timespec="seconds")
         cursor = self._db.execute(
-            """DELETE FROM jobs
-               WHERE first_seen < ? AND applied_at IS NULL AND status NOT IN ('pending', 'matched')""",
-            (cutoff,),
+            "DELETE FROM jobs WHERE first_seen < ? AND status NOT IN ('pending', 'matched')", (cutoff,)
         )
         self._db.commit()
         return cursor.rowcount
@@ -266,7 +267,5 @@ def _stored(row: sqlite3.Row) -> StoredJob:
         unverified=bool(row["unverified"]),
         employment_type=row["employment_type"],
         seniority=row["seniority"],
-        applied=row["applied_at"] is not None,
-        message_id=row["message_id"],
-        notified_at=row["notified_at"],
+        description=row["description"],
     )

@@ -21,11 +21,11 @@ log = logging.getLogger(__name__)
 MAX_DETAIL_ATTEMPTS = 3  # tries at reading a description before deciding without it
 STOP_AFTER_FAILURES = 3  # consecutive failed requests that end a phase early
 ALERT_AFTER_FAILED_CYCLES = 3  # fully failed checks in a row before telling the user
-SEND_PAUSE_SECONDS = 1.1  # Telegram allows about one message a second per chat
+DESCRIPTION_LIMIT = 8000  # characters of a posting's text that go into the file
 
 
 class NotifyError(Exception):
-    """A message could not be delivered; the job stays queued for the next check."""
+    """Something could not be delivered; the jobs stay queued for the next check."""
 
 
 class Source(Protocol):
@@ -40,7 +40,7 @@ class Notifier(Protocol):
     @property
     def ready(self) -> bool: ...
 
-    async def send_job(self, stored: StoredJob) -> int | None: ...
+    async def send_batch(self, jobs: list[StoredJob]) -> None: ...
 
     async def send_text(self, text: str) -> None: ...
 
@@ -86,6 +86,11 @@ class CycleReport:
         if self.queued:
             parts.append(f"{self.queued} queued to send")
         return ", ".join(parts) + "."
+
+
+def _clip(text: str) -> str:
+    text = text.strip()
+    return text if len(text) <= DESCRIPTION_LIMIT else text[:DESCRIPTION_LIMIT].rstrip() + " […]"
 
 
 def build_queries(config: Config) -> list[Query]:
@@ -211,11 +216,10 @@ class Monitor:
                 await self._pause(self.config.pause_between_descriptions)
                 failures_in_a_row = 0 if details is not None else failures_in_a_row + 1
 
-            # A title match goes out now even without its description; it only misses the
-            # extra tags. A job the description has to decide is worth waiting for: it is
-            # retried on later checks, and judged without the description after
+            # The description settles unclear titles and is what the file is for, so a job
+            # waits for it: it is retried on later checks and goes out without one only after
             # MAX_DETAIL_ATTEMPTS failures. Running out of this check's budget isn't a failure.
-            if details is None and reading and self.source.details_available and not stored.title_match:
+            if details is None and reading and self.source.details_available:
                 failed = tried or blocked
                 if not failed or self.storage.bump_attempts(job.id) < MAX_DETAIL_ATTEMPTS:
                     report.waiting += 1
@@ -232,6 +236,7 @@ class Monitor:
                 outcome,
                 employment_type=details.employment_type if details else None,
                 seniority=details.seniority if details else None,
+                description=_clip(details.description) if details and status == "matched" else None,
             )
             if status == "matched":
                 report.matched += 1
@@ -241,24 +246,22 @@ class Monitor:
     # ── 3. send ─────────────────────────────────────────────────────────────
 
     async def _send_matched(self, report: CycleReport) -> None:
-        queue = self.storage.matched()
-        if not queue:
+        """Everything accepted and not yet sent goes out together: one list, one file."""
+        batch = self.storage.matched()
+        if not batch:
             return
         if not self.notifier.ready:
-            report.queued = len(queue)
-            log.info("%d jobs are waiting: send /start to the bot so it knows where to post.", len(queue))
+            report.queued = len(batch)
+            log.info("%d jobs are waiting: send /start to the bot so it knows where to post.", len(batch))
             return
-        for index, stored in enumerate(queue):
-            if index:
-                await self._sleep(SEND_PAUSE_SECONDS)
-            try:
-                message_id = await self.notifier.send_job(stored)
-            except NotifyError as exc:
-                report.queued = len(queue) - index
-                log.warning("Sending stopped, %d jobs stay queued: %s", report.queued, exc)
-                return
-            self.storage.mark_sent(stored.job.id, message_id)
-            report.sent += 1
+        try:
+            await self.notifier.send_batch(batch)
+        except NotifyError as exc:
+            report.queued = len(batch)
+            log.warning("Sending failed, %d jobs stay queued for the next check: %s", len(batch), exc)
+            return
+        self.storage.mark_sent(stored.job.id for stored in batch)
+        report.sent = len(batch)
 
     # ── health ──────────────────────────────────────────────────────────────
 

@@ -22,17 +22,16 @@ linkedin:
   max_lookback_hours: 72      # after downtime, look back at most this far
   results_per_query: 50
   pause_between_queries: [4, 9]        # seconds, random within the range
-  read_descriptions: true              # open the posting to confirm unclear titles
-                                       # and to detect part-time / internship
+  read_descriptions: true              # open each relevant posting: confirms unclear titles,
+                                       # detects part-time / internship, fills the text file
   max_descriptions_per_cycle: 60
   pause_between_descriptions: [2, 5]   # seconds
   exclude_locations: []                # e.g. ["Haifa", "North District", "חיפה"]
   exclude_companies: []                # e.g. staffing agencies you don't want
 
-notifications:
-  show_match_reason: true     # adds a "why this matched" line to each message
+history:
   repost_window_days: 14      # same title + company + location within this window = repost, skipped
-  keep_history_days: 120      # forget old postings after this long (applied ones are kept)
+  keep_history_days: 120      # how long the bot remembers a posting it has already seen
 
 # A job is sent when it passes at least one track.
 # Inside a track: `exclude_title` is checked first, then the rules top to bottom;
@@ -47,7 +46,7 @@ tracks:
   - id: design
     label: Design
     emoji: "🎨"
-    star: [part-time, student, freelance, internship]   # these get a ⭐
+    star: [part-time, student, freelance, internship]   # these get a ⭐ in the list
     search_terms:
       - graphic designer
       - brand designer
@@ -105,8 +104,8 @@ tracks:
         or_employment: [internship]
         without_description: reject
 
-# Tags shown on a message. A tag is set when the title or the description
-# contains a term from the group, or LinkedIn's employment type matches.
+# Tags shown next to a job, in the list and in the file. A tag is set when the title or
+# the description contains a term from the group, or LinkedIn's employment type matches.
 highlights:
   part-time:
     title: part_time

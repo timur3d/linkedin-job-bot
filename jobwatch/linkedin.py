@@ -100,7 +100,8 @@ class LinkedInSource:
         from jobspy.model import DescriptionFormat, ScraperInput
 
         client = LinkedIn(proxies=self._proxies)
-        client.scraper_input = ScraperInput(description_format=DescriptionFormat.PLAIN)
+        # Markdown keeps the posting's paragraphs and bullet lists, which the text file is read for.
+        client.scraper_input = ScraperInput(description_format=DescriptionFormat.MARKDOWN)
         return client
 
 

@@ -65,7 +65,6 @@ class Config:
     exclude_locations: tuple[str, ...] = ()
     exclude_companies: tuple[str, ...] = ()
 
-    show_match_reason: bool = True
     repost_window_days: int = 14
     keep_history_days: int = 120
 
@@ -112,7 +111,7 @@ def load_config(path: str | Path) -> Config:
 
 
 def parse_config(data: dict[str, Any]) -> Config:
-    _only_keys(data, "config", {"linkedin", "notifications", "tracks", "highlights", "term_groups"})
+    _only_keys(data, "config", {"linkedin", "history", "tracks", "highlights", "term_groups"})
 
     groups = _term_groups(data.get("term_groups"))
     linkedin = _section(
@@ -131,7 +130,7 @@ def parse_config(data: dict[str, Any]) -> Config:
             "exclude_companies",
         },
     )
-    notifications = _section(data, "notifications", {"show_match_reason", "repost_window_days", "keep_history_days"})
+    history = _section(data, "history", {"repost_window_days", "keep_history_days"})
 
     highlights = _highlights(data.get("highlights"), groups)
     tracks = _tracks(data.get("tracks"), groups, {h.name for h in highlights} | {"remote"})
@@ -162,13 +161,8 @@ def parse_config(data: dict[str, Any]) -> Config:
         ),
         exclude_locations=_strings(linkedin.get("exclude_locations") or [], "linkedin.exclude_locations"),
         exclude_companies=_strings(linkedin.get("exclude_companies") or [], "linkedin.exclude_companies"),
-        show_match_reason=_boolean(notifications, "notifications.show_match_reason", defaults.show_match_reason),
-        repost_window_days=int(
-            _number(notifications, "notifications.repost_window_days", defaults.repost_window_days, minimum=0)
-        ),
-        keep_history_days=int(
-            _number(notifications, "notifications.keep_history_days", defaults.keep_history_days, minimum=1)
-        ),
+        repost_window_days=int(_number(history, "history.repost_window_days", defaults.repost_window_days, minimum=0)),
+        keep_history_days=int(_number(history, "history.keep_history_days", defaults.keep_history_days, minimum=1)),
     )
     if not config.locations:
         raise ConfigError("linkedin.locations needs at least one location")

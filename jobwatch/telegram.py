@@ -1,35 +1,27 @@
 """
-The Telegram side: sending jobs, the buttons under them, and the commands.
+The Telegram side: posting each check's jobs, and the few commands.
 
-The bot is not running between checks. Each run first catches up on what happened in the
-chat since the last one (button presses, commands), then checks LinkedIn and posts.
+The bot is not running between checks. Each run first catches up on commands sent since
+the last one, then checks LinkedIn and posts.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime
 from html import escape
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    BotCommand,
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-    Update,
-)
+from aiogram.types import BotCommand, BufferedInputFile, Message
 from aiogram.utils.token import TokenValidationError
 
 from .config import Config, ConfigError, Settings
-from .formatting import applied_message, job_message
+from .formatting import jobs_file, list_message
 from .linkedin import LinkedInSource
 from .models import StoredJob
 from .monitor import CycleReport, Monitor, NotifyError
@@ -37,34 +29,16 @@ from .storage import Storage
 
 log = logging.getLogger(__name__)
 
-ALLOWED_UPDATES = ["message", "callback_query"]
-HANDLED_UPDATES_KEPT = 200  # ids remembered so a re-delivered update is never applied twice
+ALLOWED_UPDATES = ["message"]
+COMMAND_MENU_VERSION = "3"  # raise when the command list changes, so the menu is set again
 
 HELP = (
-    "I check LinkedIn on a schedule and post new jobs that fit your search here.\n\n"
-    "/status — last check and totals\n"
-    "/applied — jobs you marked as applied\n\n"
-    "Under each job: <b>Mark applied</b> keeps track of where you sent a CV, "
-    "<b>Hide</b> removes a job you don't want.\n\n"
-    "I only wake up for each check, so buttons and commands take effect at the next one. "
+    "I check LinkedIn on a schedule. When a check finds new jobs that fit your search, I post a short "
+    "list with links, and a text file with the full description of each one.\n\n"
+    "/status — last check and totals\n\n"
+    "I only wake up for each check, so a command is answered at the next one. "
     "To check sooner, press <b>Run workflow</b> on the repository's Actions page."
 )
-
-
-def job_keyboard(stored: StoredJob) -> InlineKeyboardMarkup:
-    job_id = stored.job.id
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Open on LinkedIn", url=stored.job.url)],
-            [
-                InlineKeyboardButton(
-                    text="✅ Applied" if stored.applied else "Mark applied",
-                    callback_data=f"apply:{job_id}",
-                ),
-                InlineKeyboardButton(text="Hide", callback_data=f"hide:{job_id}"),
-            ],
-        ]
-    )
 
 
 class TelegramNotifier:
@@ -86,20 +60,27 @@ class TelegramNotifier:
     def ready(self) -> bool:
         return self.chat_id is not None
 
-    async def send_job(self, stored: StoredJob) -> int | None:
-        message = await self._send(job_message(stored, self._config), reply_markup=job_keyboard(stored))
-        return message.message_id
+    async def send_batch(self, jobs: list[StoredJob]) -> None:
+        """One check's jobs: the list as a message, then the file with the descriptions."""
+        filename, text = jobs_file(jobs, self._config)
+        await self._send(list_message(jobs, self._config))
+        count = "this job" if len(jobs) == 1 else f"these {len(jobs)} jobs"
+        await self._send(
+            f"Full details of {count}.", document=BufferedInputFile(text.encode("utf-8"), filename=filename)
+        )
 
     async def send_text(self, text: str) -> None:
         await self._send(text)
 
-    async def _send(self, text: str, **kwargs) -> Message:
+    async def _send(self, text: str, *, document: BufferedInputFile | None = None) -> Message:
         chat_id = self.chat_id
         if chat_id is None:
             raise NotifyError("no chat yet: send /start to the bot")
         for retry in (False, True):
             try:
-                return await self._bot.send_message(chat_id, text, **kwargs)
+                if document is not None:
+                    return await self._bot.send_document(chat_id, document, caption=text, parse_mode=None)
+                return await self._bot.send_message(chat_id, text)
             except TelegramRetryAfter as exc:
                 if retry:
                     raise NotifyError(f"Telegram rate limit: {exc}") from exc
@@ -129,7 +110,7 @@ class App:
             log.warning("Could not set the command menu: %s", exc)
         handled = await self.process_pending_updates(dispatcher)
         if handled:
-            log.info("Handled %d button presses and commands from Telegram", handled)
+            log.info("Handled %d messages from Telegram", handled)
 
         report = await self.monitor.run_cycle()
 
@@ -142,29 +123,24 @@ class App:
         return report
 
     async def register_commands(self) -> None:
-        """Fill Telegram's command menu. Once is enough, so later runs skip the call."""
-        if self.storage.get_meta("commands") == "set":
+        """Fill Telegram's command menu. Once per version of the list is enough, so later runs skip the call."""
+        if self.storage.get_meta("commands") == COMMAND_MENU_VERSION:
             return
         await self.bot.set_my_commands(
             [
                 BotCommand(command="status", description="Last check and totals"),
-                BotCommand(command="applied", description="Jobs you marked as applied"),
                 BotCommand(command="help", description="What this bot does"),
             ]
         )
-        self.storage.set_meta("commands", "set")
+        self.storage.set_meta("commands", COMMAND_MENU_VERSION)
 
     async def process_pending_updates(self, dispatcher: Dispatcher) -> int:
         """
-        Run everything Telegram queued since the last run through the handlers.
+        Run the messages Telegram queued since the last run through the handlers.
 
         Telegram keeps undelivered updates for 24 hours and forgets one once a later call
-        passes an offset beyond it. If a run dies before that call, the same updates come
-        back, so the ids already handled are remembered: "Mark applied" is a toggle and
-        must not run twice.
+        passes an offset beyond it, which is how each batch is confirmed.
         """
-        already_handled = self._handled_update_ids()
-        presses_this_run: set[tuple[str, int]] = set()
         offset: int | None = None
         handled = 0
         while True:
@@ -181,41 +157,12 @@ class App:
                 break
             for update in updates:
                 offset = update.update_id + 1
-                if update.update_id in already_handled:
-                    continue
-                if not self._is_repeat_press(update, presses_this_run):
-                    try:
-                        await dispatcher.feed_update(self.bot, update)
-                    except Exception:
-                        log.exception("Could not handle Telegram update %s", update.update_id)
-                    handled += 1
-                already_handled.append(update.update_id)
-                self.storage.set_meta("handled_updates", json.dumps(already_handled[-HANDLED_UPDATES_KEPT:]))
+                try:
+                    await dispatcher.feed_update(self.bot, update)
+                except Exception:
+                    log.exception("Could not handle Telegram update %s", update.update_id)
+                handled += 1
         return handled
-
-    def _handled_update_ids(self) -> list[int]:
-        try:
-            ids = json.loads(self.storage.get_meta("handled_updates", "[]") or "[]")
-        except ValueError:
-            return []
-        return [int(i) for i in ids] if isinstance(ids, list) else []
-
-    @staticmethod
-    def _is_repeat_press(update: Update, seen: set[tuple[str, int]]) -> bool:
-        """
-        The same button tapped again before anything visibly changed.
-
-        Between runs a tap gets no response, so people tap twice. Each tap was made looking
-        at the same button, so they all mean the same single action.
-        """
-        query = update.callback_query
-        if query is None or query.data is None or query.message is None:
-            return False
-        key = (query.data, query.message.message_id)
-        if key in seen:
-            return True
-        seen.add(key)
-        return False
 
     def status_text(self) -> str:
         lines = ["<b>Status</b>"]
@@ -225,8 +172,7 @@ class App:
         counts = self.storage.counts()
         lines.append(
             f"Watching {len(self.monitor.queries)} searches. "
-            f"So far: {sum(v for k, v in counts.items() if k != 'applied')} postings seen, "
-            f"{counts.get('sent', 0) + counts.get('dismissed', 0)} sent, {counts['applied']} applied."
+            f"So far: {sum(counts.values())} postings seen, {counts.get('sent', 0)} sent."
         )
         waiting = counts.get("pending", 0) + counts.get("matched", 0)
         if waiting:
@@ -238,29 +184,16 @@ def _clock(moment: datetime) -> str:
     return moment.astimezone().strftime("%H:%M")
 
 
-async def _answer(query: CallbackQuery, text: str, *, alert: bool = False) -> None:
-    """The little toast after a button press. Telegram refuses it once the press is more than
-    a few seconds old, which is the usual case here, so a failure is not an error."""
-    try:
-        await query.answer(text, show_alert=alert)
-    except TelegramAPIError as exc:
-        log.debug("Could not answer a button press: %s", exc)
-
-
 def build_router(app: App) -> Router:
     root = Router()
     owner = Router()  # everything except /start is only for the chat the bot posts to
 
-    # These must be coroutines: aiogram runs plain functions in a worker thread, and the
+    # This must be a coroutine: aiogram runs plain functions in a worker thread, and the
     # chat id may be read from SQLite, which only allows the thread that opened it.
     async def from_owner_chat(message: Message) -> bool:
         return message.chat.id == app.notifier.chat_id
 
-    async def pressed_in_owner_chat(query: CallbackQuery) -> bool:
-        return query.message is not None and query.message.chat.id == app.notifier.chat_id
-
     owner.message.filter(from_owner_chat)
-    owner.callback_query.filter(pressed_in_owner_chat)
 
     @root.message(CommandStart())
     async def start(message: Message) -> None:
@@ -286,43 +219,6 @@ def build_router(app: App) -> Router:
     @owner.message(Command("status"))
     async def status(message: Message) -> None:
         app.status_requested = True
-
-    @owner.message(Command("applied"))
-    async def applied(message: Message) -> None:
-        await message.answer(applied_message(app.storage.applied()))
-
-    @owner.callback_query(F.data.startswith("apply:"))
-    async def toggle_applied(query: CallbackQuery) -> None:
-        job_id = query.data.split(":", 1)[1]
-        stored = app.storage.get(job_id)
-        if stored is None:
-            await _answer(query, "I no longer have this job on record.", alert=True)
-            return
-        app.storage.set_applied(job_id, not stored.applied)
-        stored = app.storage.get(job_id)
-        if isinstance(query.message, Message):
-            try:
-                await query.message.edit_reply_markup(reply_markup=job_keyboard(stored))
-            except TelegramAPIError as exc:
-                log.debug("Could not update the buttons: %s", exc)
-        await _answer(query, "Marked as applied" if stored.applied else "Unmarked")
-
-    @owner.callback_query(F.data.startswith("hide:"))
-    async def hide(query: CallbackQuery) -> None:
-        job_id = query.data.split(":", 1)[1]
-        app.storage.mark_dismissed(job_id)
-        if isinstance(query.message, Message):
-            try:
-                await query.message.delete()
-            except TelegramAPIError:
-                # Telegram won't delete messages older than 48 hours; collapse it instead.
-                stored = app.storage.get(job_id)
-                title = escape(stored.job.title) if stored else "Job"
-                try:
-                    await query.message.edit_text(f"<s>{title}</s> (hidden)", reply_markup=None)
-                except TelegramAPIError as exc:
-                    log.debug("Could not hide the message: %s", exc)
-        await _answer(query, "Hidden")
 
     root.include_router(owner)
     return root
